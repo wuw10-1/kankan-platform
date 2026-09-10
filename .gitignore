@@ -29,7 +29,10 @@ release.properties
 dependency-reduced-pom.xml
 buildNumber.properties
 .mvn/timing.properties
-.mvn/wrapper/maven-wrapper.jar
+
+# Maven Wrapper：脚本与 jar 必须入库，否则 mvnw 在无 Maven 的机器上不可用。
+# 注意上面的 *.jar 规则会误伤它，因此在此显式取反。
+!.mvn/wrapper/maven-wrapper.jar
 
 # Gradle
 .gradle/
