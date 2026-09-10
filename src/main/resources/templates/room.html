@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>观影房间 - Kankan</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/room.css">
+</head>
+<body>
+    <div id="app">
+        <el-config-provider :locale="zhCn">
+            <room-component></room-component>
+        </el-config-provider>
+    </div>
+
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/element-plus"></script>
+    <script src="https://unpkg.com/element-plus/dist/locale/zh-cn.min.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/components/video-player.js"></script>
+    <script src="/js/components/chat.js"></script>
+    <script src="/js/components/room.js"></script>
+    <script>
+        const app = Vue.createApp({
+            setup() {
+                return {
+                    zhCn: ElementPlusLocaleZhCn
+                }
+            }
+        });
+        app.component('room-component', RoomComponent);
+        app.use(ElementPlus);
+        app.mount('#app');
+    </script>
+</body>
+</html>
