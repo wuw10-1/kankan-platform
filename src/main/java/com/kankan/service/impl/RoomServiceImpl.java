@@ -254,6 +254,7 @@ public class RoomServiceImpl implements RoomService {
                 .action(isPlaying ? VideoSyncMessage.VideoAction.PLAY : VideoSyncMessage.VideoAction.PAUSE)
                 .currentTime(currentTime)
                 .playbackRate(1.0) // 默认播放速率
+                .durationSeconds(resolveVideoDurationSeconds(roomId))
                 .timestamp(System.currentTimeMillis())
                 .build();
         
@@ -273,14 +274,53 @@ public class RoomServiceImpl implements RoomService {
 
     @Override
     public VideoSyncMessage getRoomVideoState(String roomId) {
+        // 优先读缓存；缓存未命中（或开发环境未配置 Redis）时回落到房间实体，
+        // 避免新成员加入时拿不到当前播放状态。
         try {
             if (redisTemplate != null) {
-                return (VideoSyncMessage) redisTemplate.opsForValue().get(ROOM_VIDEO_STATE_KEY_PREFIX + roomId);
+                VideoSyncMessage cached =
+                        (VideoSyncMessage) redisTemplate.opsForValue().get(ROOM_VIDEO_STATE_KEY_PREFIX + roomId);
+                if (cached != null) {
+                    return cached;
+                }
             }
         } catch (Exception e) {
             log.warn("Redis操作失败，可能是开发环境没有配置Redis: {}", e.getMessage());
         }
-        return null;
+
+        return roomRepository.findByRoomCode(roomId)
+                .map(room -> VideoSyncMessage.builder()
+                        .roomId(roomId)
+                        .action(VideoSyncMessage.VideoAction.PAUSE)
+                        .currentTime(0.0)
+                        .playbackRate(1.0)
+                        .durationSeconds(resolveVideoDurationSeconds(room))
+                        .timestamp(System.currentTimeMillis())
+                        .build())
+                .orElse(null);
+    }
+
+    /**
+     * 读取房间当前视频的总时长（秒），用于延迟补偿的边界保护。
+     *
+     * @param roomId 房间编号
+     * @return 视频时长；房间或视频缺失、时长未知时返回 null
+     */
+    private Double resolveVideoDurationSeconds(String roomId) {
+        return roomRepository.findByRoomCode(roomId)
+                .map(this::resolveVideoDurationSeconds)
+                .orElse(null);
+    }
+
+    /**
+     * @param room 房间实体
+     * @return 视频时长（秒）；未知时返回 null
+     */
+    private Double resolveVideoDurationSeconds(Room room) {
+        if (room.getCurrentVideo() == null || room.getCurrentVideo().getDuration() == null) {
+            return null;
+        }
+        return room.getCurrentVideo().getDuration().doubleValue();
     }
     
     private String generateUniqueRoomCode() {

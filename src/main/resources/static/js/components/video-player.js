@@ -19,6 +19,11 @@ const VideoPlayerComponent = {
                     <el-col :span="3">
                         <span>{{ formatTime(currentTime) }} / {{ formatTime(duration) }}</span>
                     </el-col>
+                    <el-col :span="2">
+                        <el-tooltip content="EWMA 平滑后的往返时延；用作单向延迟补偿依据" placement="top">
+                            <span class="rtt-indicator">RTT {{ smoothedRttMs }}ms</span>
+                        </el-tooltip>
+                    </el-col>
                     <el-col :span="3">
                         <el-dropdown @command="changePlaybackRate">
                             <el-button>{{ playbackRate }}x</el-button>
@@ -78,6 +83,17 @@ const VideoPlayerComponent = {
         const isSeeking = Vue.ref(false);
         const isInitialSync = Vue.ref(true);
         
+        // ---- 延迟补偿（论文 5.2 节）----
+        // 每个页面实例一个稳定的客户端标识，用于隔离 RTT 探测响应与私有状态回发
+        const clientId = (window.crypto && window.crypto.randomUUID)
+            ? window.crypto.randomUUID()
+            : 'client-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+        const compensator = new KankanSync.LatencyCompensator();
+        const smoothedRttMs = Vue.ref(0);
+        let rttProbe = null;
+        let lastSeekSentAt = 0;
+        const isRateLimitedSeek = Vue.ref(false);
+        
         // 初始化视频
         Vue.onMounted(() => {
             const video = videoElement.value;
@@ -100,8 +116,26 @@ const VideoPlayerComponent = {
                 duration.value = video.duration;
             });
             
+            // 启动 RTT 探测循环
+            rttProbe = new KankanSync.RttProbe({
+                clientId: clientId,
+                getStompClient: () => props.stompClient,
+                compensator: compensator,
+                onSample: () => {
+                    smoothedRttMs.value = Math.round(compensator.getSmoothedRttMs());
+                }
+            });
+            rttProbe.start();
+            
             // 加入房间
             joinRoom();
+        });
+        
+        Vue.onUnmounted(() => {
+            if (rttProbe) {
+                rttProbe.stop();
+                rttProbe = null;
+            }
         });
         
         // 格式化时间
@@ -182,6 +216,18 @@ const VideoPlayerComponent = {
         const sendVideoAction = (action) => {
             const video = videoElement.value;
             
+            // 房主端 SEEK 限频：论文 5.2.2 要求每 200ms 最多发送一次（5Hz），
+            // 避免快速拖动进度条时刷爆房间广播。服务端另有一道权威校验。
+            if (action === 'SEEK') {
+                const now = Date.now();
+                if (now - lastSeekSentAt < KankanSync.constants.SEEK_RATE_LIMIT_MS) {
+                    isRateLimitedSeek.value = true;
+                    return;
+                }
+                isRateLimitedSeek.value = false;
+                lastSeekSentAt = now;
+            }
+            
             props.stompClient.send('/app/video.sync', {}, JSON.stringify({
                 roomId: props.roomId,
                 action: action,
@@ -189,7 +235,12 @@ const VideoPlayerComponent = {
                 playbackRate: video.playbackRate,
                 userId: props.userId,
                 username: props.username,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                // 发起动作的本地时刻，成员端据此计算网络单向延迟
+                clientSendTime: Date.now(),
+                // 视频总时长，供成员端做边界保护
+                durationSeconds: (isFinite(duration.value) && duration.value > 0) ? duration.value : null,
+                clientId: clientId
             }));
         };
         
@@ -199,7 +250,8 @@ const VideoPlayerComponent = {
                 roomId: props.roomId,
                 userId: props.userId,
                 username: props.username,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                clientId: clientId
             }));
             
             // 订阅房间视频同步消息
@@ -207,10 +259,66 @@ const VideoPlayerComponent = {
                 handleVideoSync(JSON.parse(message.body));
             });
             
-            // 订阅个人同步消息
-            props.stompClient.subscribe(`/user/queue/video.sync`, (message) => {
+            // 订阅时间同步响应，用于 RTT 采样
+            props.stompClient.subscribe('/topic/time.sync', (message) => {
+                if (rttProbe) {
+                    rttProbe.handlePong(JSON.parse(message.body));
+                }
+            });
+            
+            // 订阅私有状态回发（服务端按 clientId 路由）；
+            // 原 /user/queue/video.sync 因缺少 Principal 无法解析，已不再使用。
+            props.stompClient.subscribe(`/topic/sync.${clientId}`, (message) => {
                 handleVideoSync(JSON.parse(message.body));
             });
+        };
+        
+        /**
+         * 依据延迟补偿结果决定本次同步应跳转到的时间点。
+         *
+         * 公式：T_sync = t_target - RTT_smooth/2，并做边界保护与关键帧对齐。
+         *
+         * @param {object} message 同步消息
+         * @returns {number} 应跳转到的位置（秒）
+         */
+        const resolveCompensatedTarget = (message) => {
+            const video = videoElement.value;
+            const fallbackDuration = (isFinite(duration.value) && duration.value > 0) ? duration.value : 0;
+            const videoDuration = (typeof message.durationSeconds === 'number' && message.durationSeconds > 0)
+                ? message.durationSeconds
+                : fallbackDuration;
+            
+            // 用服务端发送该消息的时刻作为补偿基准：网络延迟只发生在
+            // 服务端→客户端这一段，因此补偿量为 RTT/2。
+            const anchorSeconds = (typeof message.serverSendTime === 'number')
+                ? message.serverSendTime / 1000
+                : (typeof message.clientSendTime === 'number' ? message.clientSendTime / 1000 : null);
+            
+            let target = message.currentTime;
+            const elapsed = anchorSeconds !== null
+                ? Math.max(0, Date.now() / 1000 - anchorSeconds)
+                : 0;
+            
+            if (message.action === 'PLAY') {
+                // 播放状态下，服务端发出后又过去了 elapsed，房主仍在推进，因此加上这段
+                target = target + elapsed;
+            } else {
+                // 暂停/拖动：目标点是静态位置，需要回退单向延迟
+                target = compensator.compensateTargetSeconds(target, videoDuration);
+            }
+            
+            // 关键帧对齐：使用浏览器已解析的可寻址区间作为候选关键帧兜底
+            const seekable = video.seekable;
+            if (seekable && seekable.length > 0) {
+                const candidates = [];
+                for (let i = 0; i < seekable.length; i += 1) {
+                    candidates.push(seekable.start(i));
+                    candidates.push(seekable.end(i));
+                }
+                target = KankanSync.alignToKeyframe(target, candidates);
+            }
+            
+            return target;
         };
         
         // 处理视频同步消息
@@ -224,9 +332,11 @@ const VideoPlayerComponent = {
             
             switch (message.action) {
                 case 'PLAY':
+                    // 播放状态下由 resolveCompensatedTarget 补上服务端发出后的流逝时间
+                    const playTarget = resolveCompensatedTarget(message);
                     // 同步时间（如果差异大于0.5秒）
-                    if (Math.abs(video.currentTime - message.currentTime) > 0.5) {
-                        video.currentTime = message.currentTime;
+                    if (Math.abs(video.currentTime - playTarget) > 0.5) {
+                        video.currentTime = playTarget;
                     }
                     // 同步播放速率
                     if (video.playbackRate !== message.playbackRate) {
@@ -238,16 +348,21 @@ const VideoPlayerComponent = {
                     break;
                     
                 case 'PAUSE':
-                    // 同步时间
-                    video.currentTime = message.currentTime;
+                    // 暂停时目标点是静态位置，需回退单向延迟后再同步
+                    video.currentTime = resolveCompensatedTarget(message);
                     // 暂停视频
                     video.pause();
                     break;
                     
                 case 'SEEK':
+                    // 延迟补偿后若与本地位置差异过小，忽略本次 SEEK 以防画面抖动（论文 5.2.2）
+                    const seekTarget = resolveCompensatedTarget(message);
+                    if (KankanSync.shouldIgnoreSeek(seekTarget, video.currentTime)) {
+                        break;
+                    }
                     // 同步时间
                     isSeeking.value = true;
-                    video.currentTime = message.currentTime;
+                    video.currentTime = seekTarget;
                     break;
                     
                 case 'RATE_CHANGE':
@@ -269,7 +384,7 @@ const VideoPlayerComponent = {
                 case 'SYNC_RESPONSE':
                     // 初始同步响应
                     if (isInitialSync.value) {
-                        video.currentTime = message.currentTime;
+                        video.currentTime = resolveCompensatedTarget(message);
                         video.playbackRate = message.playbackRate;
                         playbackRate.value = message.playbackRate;
                         
@@ -323,7 +438,10 @@ const VideoPlayerComponent = {
             onSliderChange,
             onSeeked,
             onTimeUpdate,
-            changePlaybackRate
+            changePlaybackRate,
+            // 延迟补偿状态，供模板展示与调试
+            smoothedRttMs,
+            isRateLimitedSeek
         };
     }
 };
