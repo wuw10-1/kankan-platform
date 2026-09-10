@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: kankan-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: kankan
+      MYSQL_USER: kankan
+      MYSQL_PASSWORD: kankan
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - kankan-network
+
+  redis:
+    image: redis:6.2
+    container_name: kankan-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - kankan-network
+
+  app:
+    build: .
+    container_name: kankan-app
+    depends_on:
+      - mysql
+      - redis
+    ports:
+      - "8090:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/kankan?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf-8
+      - SPRING_DATASOURCE_USERNAME=kankan
+      - SPRING_DATASOURCE_PASSWORD=kankan
+      - SPRING_REDIS_HOST=redis
+    networks:
+      - kankan-network
+
+networks:
+  kankan-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
