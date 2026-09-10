@@ -1,0 +1,65 @@
+server:
+  port: 8090
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: kankan-platform
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/kankan?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf-8}
+    username: ${DB_USERNAME:kankan_user}
+    password: ${DB_PASSWORD:secure_password}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQL8Dialect
+  redis:
+    host: localhost
+    port: 6379
+    password:
+    database: 0
+    timeout: 10000
+  servlet:
+    multipart:
+      max-file-size: 500MB
+      max-request-size: 500MB
+
+# JWT配置
+jwt:
+  secret: ${JWT_SECRET:kankan_secret_key_must_be_very_long_and_secure_for_production_use}
+  expiration: ${JWT_EXPIRATION:86400000}  # 24小时
+
+# 阿里云OSS配置
+aliyun:
+  oss:
+    endpoint: ${ALIYUN_OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+    accessKeyId: ${ALIYUN_OSS_ACCESS_KEY_ID:your-access-key-id}
+    accessKeySecret: ${ALIYUN_OSS_ACCESS_KEY_SECRET:your-access-key-secret}
+    bucketName: ${ALIYUN_OSS_BUCKET_NAME:kankan-video}
+
+# FFmpeg配置
+ffmpeg:
+  path: ${FFMPEG_PATH:C:\\ffmpeg\\bin\\ffmpeg.exe}
+  probe-path: ${FFPROBE_PATH:C:\\ffmpeg\\bin\\ffprobe.exe}
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.kankan: INFO
+    org.springframework.web: WARN
+    org.hibernate: WARN
+
+# Swagger配置
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
